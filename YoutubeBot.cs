@@ -1,23 +1,17 @@
-﻿using YoutubeExplode;
-using YoutubeExplode.Videos;
-using NAudio.Wave;
+﻿using DSharpPlus.Entities;
 using DSharpPlus.SlashCommands;
-using DSharpPlus.Entities;
 using DSharpPlus;
 using DSharpPlus.VoiceNext;
-using System.Threading;
 
-namespace DiscordBot
+namespace DiscordBotYoutube
 {
-    internal class Youtube : ApplicationCommandModule
+    public class YoutubeBot : ApplicationCommandModule
     {
-        private static Queue<Video> songQueue = new();
-        private static YoutubeClient youtube = new();
-        private static CancellationTokenSource tokenSource = new();
+        private readonly IYoutubeService _youtubeService;
 
-        public Youtube()
+        public YoutubeBot(IYoutubeService youtubeService)
         {
-            youtube = new YoutubeClient();
+            _youtubeService = youtubeService;
         }
 
         [SlashCommand("join", "Join the user's voice channel or the specified channel")]
@@ -51,10 +45,11 @@ namespace DiscordBot
         [SlashCommand("queue", "Queue a song using the provided YouTube URL")]
         public async Task QueueSongAsync(InteractionContext ctx, [Option("url", "The YouTube URL of the song to queue")] string url)
         {
-            var video = await youtube.Videos.GetAsync(url);
+            var video = await _youtubeService.GetVideoAsync(url);
             if (video != null)
             {
-                songQueue.Enqueue(video);
+                _youtubeService.EnqueueSong(video);
+
                 await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
                     .WithContent($"Song queued: {url}"));
                 return;
@@ -68,18 +63,18 @@ namespace DiscordBot
         [SlashCommand("play", "Play the queued songs")]
         public async Task PlaySongAsync(InteractionContext ctx)
         {
-            if (songQueue.Count > 0)
+            if (_youtubeService.GetSongs().Count > 0)
             {
                 await ctx.CreateResponseAsync(InteractionResponseType.DeferredChannelMessageWithSource);
 
-                while (songQueue.Count > 0)
+                while (_youtubeService.GetSongs().Count > 0)
                 {
-                    var video = songQueue.Dequeue();
-                    await ctx.FollowUpAsync(new DiscordFollowupMessageBuilder()
-                        .WithContent($"Playing: {video.Id}"));
+                    var video = _youtubeService.DequeueSong();
 
-                    tokenSource = new CancellationTokenSource();
-                    await Play(video.Id, tokenSource.Token);
+                    await ctx.FollowUpAsync(new DiscordFollowupMessageBuilder()
+                        .WithContent($"Playing: {video.Title}"));
+
+                    await _youtubeService.PlayAsync(video.Id);
                 }
 
                 await ctx.FollowUpAsync(new DiscordFollowupMessageBuilder()
@@ -92,13 +87,13 @@ namespace DiscordBot
             }
         }
 
-
         [SlashCommand("skip", "Skip the current song")]
         public async Task SkipSongAsync(InteractionContext ctx)
         {
-            if (songQueue.Count > 0)
+            if (_youtubeService.GetSongs().Count > 0)
             {
-                Skip();
+                _youtubeService.Skip();
+
                 await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
                     .WithContent("Skipping the current song..."));
             }
@@ -109,67 +104,30 @@ namespace DiscordBot
             }
         }
 
-        private async Task Play(string videoId, CancellationToken cancellationToken)
+        [SlashCommand("stop", "Stop the current song")]
+        public async Task StopSongAsync(InteractionContext ctx)
         {
-            try
-            {
-                var video = await youtube.Videos.GetAsync(videoId);
-                var streamManifest = await youtube.Videos.Streams.GetManifestAsync(videoId);
+            _youtubeService.Stop();
 
-                var audioStreamInfo = streamManifest.GetAudioOnlyStreams().OrderByDescending(s => s.Bitrate).FirstOrDefault();
+            await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
+                .WithContent("Stopping the current song..."));
 
-                if (audioStreamInfo != null)
-                {
-                    var stream = await youtube.Videos.Streams.GetAsync(audioStreamInfo);
-                    var tempFilePath = Path.GetTempFileName();
-                    await using (var fileStream = File.OpenWrite(tempFilePath))
-                    {
-                        await stream.CopyToAsync(fileStream);
-                    }
-
-                    using var mediaFoundationReader = new MediaFoundationReader(tempFilePath);
-                    using var pcmStream = WaveFormatConversionStream.CreatePcmStream(mediaFoundationReader);
-                    using var blockAlignedStream = new BlockAlignReductionStream(pcmStream);
-
-                    var player = new WaveOutEvent();
-                    player.Init(blockAlignedStream);
-                    player.Play();
-
-                    player.PlaybackStopped += (sender, args) =>
-                    {
-                        player.Dispose();
-                        blockAlignedStream.Dispose();
-                        File.Delete(tempFilePath);
-                    };
-
-                    while (player.PlaybackState == PlaybackState.Playing)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        await Task.Delay(1000); // Wait for a second before checking again
-                    }
-                }
-            }
-            catch (OperationCanceledException exception)
-            {
-                Console.WriteLine("Cancelled playing current song");
-            }
-            catch (Exception exception)
-            {
-                Console.WriteLine($"Error playing song, {exception.Message}");
-            }
         }
 
-        private async void Queue(string videoUrl)
+        [SlashCommand("playlist", "Show the current playlist")]
+        public async Task ShowPlaylistAsync(InteractionContext ctx, [Option("amount", "The amount of up coming songs")] long amountToShow = 5)
         {
-            var video = await youtube.Videos.GetAsync(videoUrl);
-            songQueue.Enqueue(video);
+            if (_youtubeService.GetSongs().Count > 0)
+            {
+                var currentPlaylist = _youtubeService.ShowPlaylist(amountToShow);
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
+                    .WithContent(currentPlaylist));
+            }
+            else
+            {
+                await ctx.CreateResponseAsync(InteractionResponseType.ChannelMessageWithSource, new DiscordInteractionResponseBuilder()
+                    .WithContent("No songs in the queue."));
+            }
         }
-
-        private void Skip()
-        {
-            tokenSource.Cancel();
-            tokenSource = new CancellationTokenSource();
-        }
-
     }
 }
